@@ -1,0 +1,7 @@
+{
+  "config": {
+    "step": {"user": {"title": "Nerva Scooter", "data": {"address": "Dispositivo Bluetooth", "vin": "Telaio (VIN)", "model": "Codice modello", "password": "Password Nerva App (8 caratteri, opzionale)"}}},
+    "error": {"invalid_vin": "Il VIN deve essere di 17 caratteri (maiuscole e numeri)", "invalid_password": "La password deve avere 8 caratteri"},
+    "abort": {"already_configured": "Già configurato"}
+  }
+}
