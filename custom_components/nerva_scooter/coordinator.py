@@ -26,7 +26,6 @@ def _find_chars(client: BleakClient):
         for ch in svc.characteristics:
             _LOGGER.debug("  %s %s", ch.uuid, ch.properties)
 
-    # Priorità al servizio seriale standard 0000fff0, poi agli altri non standard
     fff0 = [s for s in services if s.uuid.startswith("0000fff0")]
     others = [s for s in services if not s.uuid.startswith(_STANDARD) and not s.uuid.startswith("0000fff0")]
     for svc in fff0 + others:
@@ -44,14 +43,23 @@ class NervaCoordinator(DataUpdateCoordinator[dict]):
             update_interval=timedelta(seconds=SCAN_INTERVAL_SECONDS),
         )
         self.address, self.vin, self.model, self.password = address, vin, model, password
+        self.connected: bool = False
+
+    def _fallback_or_raise(self, msg: str, err: Exception | None = None) -> dict:
+        self.connected = False
+        if self.data:
+            _LOGGER.debug("%s - mantengo ultimi dati validi", msg)
+            return self.data
+        if err:
+            raise UpdateFailed(msg) from err
+        raise UpdateFailed(msg)
 
     async def _async_update_data(self) -> dict:
         device = bluetooth.async_ble_device_from_address(self.hass, self.address, connectable=True)
         if device is None:
-            raise UpdateFailed("Scooter non raggiungibile via Bluetooth (spento o fuori portata)")
+            return self._fallback_or_raise("Scooter non raggiungibile via Bluetooth (spento o fuori portata)")
         buf = FrameBuffer()
         got: asyncio.Future = self.hass.loop.create_future()
-
         bind_done = asyncio.Event()
 
         def _on_data(_, data: bytearray) -> None:
@@ -67,7 +75,7 @@ class NervaCoordinator(DataUpdateCoordinator[dict]):
         try:
             client = await establish_connection(BleakClientWithServiceCache, device, self.address)
         except Exception as err:
-            raise UpdateFailed(f"Connessione BLE fallita: {err}") from err
+            return self._fallback_or_raise(f"Connessione BLE fallita: {err}", err)
         try:
             notify, write = _find_chars(client)
             use_response = "write-without-response" not in write.properties
@@ -80,11 +88,15 @@ class NervaCoordinator(DataUpdateCoordinator[dict]):
                     _LOGGER.debug("Nessuna risposta al binding, continuo comunque")
             cmd = build_command(CMD_VEHICLE_INFO, self.vin, self.model)
             await client.write_gatt_char(write, cmd, response=use_response)
-            return await asyncio.wait_for(got, RESPONSE_TIMEOUT)
+            data = await asyncio.wait_for(got, RESPONSE_TIMEOUT)
+            self.connected = True
+            return data
         except asyncio.TimeoutError as err:
-            raise UpdateFailed("Nessuna risposta dallo scooter (codice modello errato?)") from err
+            return self._fallback_or_raise("Nessuna risposta dallo scooter (codice modello errato?)", err)
+        except Exception as err:
+            return self._fallback_or_raise(f"Errore lettura BLE: {err}", err)
         finally:
             try:
-                await client.disconnect()  # libera la connessione per l'app Nerva
+                await client.disconnect()
             except Exception:  # noqa: BLE001
                 pass
