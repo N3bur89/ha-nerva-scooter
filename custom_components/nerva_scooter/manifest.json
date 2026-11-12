@@ -1,7 +1,7 @@
 {
   "domain": "nerva_scooter",
   "name": "Nerva Scooter",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "documentation": "https://github.com",
   "issue_tracker": "https://github.com/issues",
   "dependencies": ["bluetooth_adapters"],
