@@ -25,11 +25,13 @@ def _find_chars(client: BleakClient):
         _LOGGER.debug("Servizio %s: %s", idx, svc.uuid)
         for ch in svc.characteristics:
             _LOGGER.debug("  %s %s", ch.uuid, ch.properties)
-    # come l'app: servizio indice 2, caratteristica 0 = notify, 1 = write
-    candidates = [s for s in services if not s.uuid.startswith(_STANDARD)]
-    for svc in ([services[2]] if len(services) > 2 else []) + candidates:
+
+    # Priorità al servizio seriale standard 0000fff0, poi agli altri non standard
+    fff0 = [s for s in services if s.uuid.startswith("0000fff0")]
+    others = [s for s in services if not s.uuid.startswith(_STANDARD) and not s.uuid.startswith("0000fff0")]
+    for svc in fff0 + others:
         notify = [c for c in svc.characteristics if "notify" in c.properties or "indicate" in c.properties]
-        write = [c for c in svc.characteristics if "write" in c.properties or "write-without-response" in c.properties]
+        write = [c for c in svc.characteristics if "write-without-response" in c.properties or "write" in c.properties]
         if notify and write:
             return notify[0], write[0]
     raise UpdateFailed("Caratteristiche BLE notify/write non trovate")
@@ -68,15 +70,16 @@ class NervaCoordinator(DataUpdateCoordinator[dict]):
             raise UpdateFailed(f"Connessione BLE fallita: {err}") from err
         try:
             notify, write = _find_chars(client)
+            use_response = "write-without-response" not in write.properties
             await client.start_notify(notify, _on_data)
             if self.password:
-                await client.write_gatt_char(write, build_bind(self.vin, self.password, self.model), response="write" in write.properties)
+                await client.write_gatt_char(write, build_bind(self.vin, self.password, self.model), response=use_response)
                 try:
                     await asyncio.wait_for(bind_done.wait(), 3)
                 except asyncio.TimeoutError:
                     _LOGGER.debug("Nessuna risposta al binding, continuo comunque")
             cmd = build_command(CMD_VEHICLE_INFO, self.vin, self.model)
-            await client.write_gatt_char(write, cmd, response="write" in write.properties)
+            await client.write_gatt_char(write, cmd, response=use_response)
             return await asyncio.wait_for(got, RESPONSE_TIMEOUT)
         except asyncio.TimeoutError as err:
             raise UpdateFailed("Nessuna risposta dallo scooter (codice modello errato?)") from err
