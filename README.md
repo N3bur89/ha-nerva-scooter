@@ -15,7 +15,7 @@ Monitora in locale (senza cloud) i principali parametri dello scooter:
 ## Installazione tramite HACS
 1. Apri **HACS** in Home Assistant.
 2. Clicca sui tre puntini in alto a destra e seleziona **Repository personalizzati** (*Custom repositories*).
-3. Incolla l'URL `https://github.com` e scegli la categoria **Integrazione** (*Integration*).
+3. Incolla l'URL `https://github.com/N3bur89/ha-nerva-scooter` e scegli la categoria **Integrazione** (*Integration*).
 4. Clicca su **Aggiungi**, cerca **Nerva Scooter** e installalo.
 5. Riavvia Home Assistant.
 
