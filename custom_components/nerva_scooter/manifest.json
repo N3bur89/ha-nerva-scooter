@@ -1,9 +1,9 @@
 {
   "domain": "nerva_scooter",
   "name": "Nerva Scooter",
-  "version": "0.2.0",
-  "documentation": "https://github.com",
-  "issue_tracker": "https://github.com/issues",
+  "version": "0.2.1",
+  "documentation": "https://github.com/N3bur89/ha-nerva-scooter",
+  "issue_tracker": "https://github.com/N3bur89/ha-nerva-scooter/issues",
   "dependencies": ["bluetooth_adapters"],
   "requirements": [],
   "codeowners": ["@N3bur89"],

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import timedelta
 
 from bleak import BleakClient
@@ -15,6 +16,8 @@ from .const import DOMAIN, RESPONSE_TIMEOUT, SCAN_INTERVAL_SECONDS
 from .protocol import CMD_VEHICLE_INFO, FrameBuffer, build_bind, build_command, parse_bind_reply
 
 _LOGGER = logging.getLogger(__name__)
+CONNECT_TIMEOUT = 30
+STALE_MAX = 600  # secondi: oltre, i sensori diventano "non disponibili"
 _STANDARD = ("00001800", "00001801", "0000180a")
 
 
@@ -44,10 +47,11 @@ class NervaCoordinator(DataUpdateCoordinator[dict]):
         )
         self.address, self.vin, self.model, self.password = address, vin, model, password
         self.connected: bool = False
+        self._last_ok: float = 0.0
 
     def _fallback_or_raise(self, msg: str, err: Exception | None = None) -> dict:
         self.connected = False
-        if self.data:
+        if self.data and time.monotonic() - self._last_ok < STALE_MAX:
             _LOGGER.debug("%s - mantengo ultimi dati validi", msg)
             return self.data
         if err:
@@ -73,9 +77,19 @@ class NervaCoordinator(DataUpdateCoordinator[dict]):
                     got.set_result(frame)
 
         try:
-            client = await establish_connection(BleakClientWithServiceCache, device, self.address)
-        except Exception as err:
-            return self._fallback_or_raise(f"Connessione BLE fallita: {err}", err)
+            client = await asyncio.wait_for(
+                establish_connection(BleakClientWithServiceCache, device, self.address, max_attempts=2),
+                CONNECT_TIMEOUT,
+            )
+        except BaseException as err:  # noqa: BLE001
+            # connessione rimasta a metà in BlueZ: la chiudo esplicitamente
+            try:
+                await asyncio.shield(asyncio.wait_for(BleakClient(device).disconnect(), 5))
+            except BaseException:  # noqa: BLE001
+                pass
+            if isinstance(err, asyncio.CancelledError):
+                raise
+            return self._fallback_or_raise(f"Connessione BLE fallita: {err!r}", err)
         try:
             notify, write = _find_chars(client)
             use_response = "write-without-response" not in write.properties
@@ -90,6 +104,7 @@ class NervaCoordinator(DataUpdateCoordinator[dict]):
             await client.write_gatt_char(write, cmd, response=use_response)
             data = await asyncio.wait_for(got, RESPONSE_TIMEOUT)
             self.connected = True
+            self._last_ok = time.monotonic()
             return data
         except asyncio.TimeoutError as err:
             return self._fallback_or_raise("Nessuna risposta dallo scooter (codice modello errato?)", err)
