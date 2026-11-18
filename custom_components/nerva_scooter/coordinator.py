@@ -16,7 +16,6 @@ from .const import DOMAIN, RESPONSE_TIMEOUT, SCAN_INTERVAL_SECONDS
 from .protocol import CMD_VEHICLE_INFO, FrameBuffer, build_bind, build_command, parse_bind_reply
 
 _LOGGER = logging.getLogger(__name__)
-CONNECT_TIMEOUT = 30
 STALE_MAX = 600  # secondi: oltre, i sensori diventano "non disponibili"
 _STANDARD = ("00001800", "00001801", "0000180a")
 
@@ -48,6 +47,7 @@ class NervaCoordinator(DataUpdateCoordinator[dict]):
         self.address, self.vin, self.model, self.password = address, vin, model, password
         self.connected: bool = False
         self._last_ok: float = 0.0
+        self._lock = asyncio.Lock()
 
     def _fallback_or_raise(self, msg: str, err: Exception | None = None) -> dict:
         self.connected = False
@@ -59,6 +59,16 @@ class NervaCoordinator(DataUpdateCoordinator[dict]):
         raise UpdateFailed(msg)
 
     async def _async_update_data(self) -> dict:
+        # una sola connessione alla volta: due letture in parallelo si bloccano a vicenda (BlueZ "InProgress")
+        if self._lock.locked():
+            _LOGGER.debug("Lettura già in corso, salto questo giro")
+            if self.data:
+                return self.data
+            raise UpdateFailed("Lettura già in corso")
+        async with self._lock:
+            return await self._read_scooter()
+
+    async def _read_scooter(self) -> dict:
         device = bluetooth.async_ble_device_from_address(self.hass, self.address, connectable=True)
         if device is None:
             return self._fallback_or_raise("Scooter non raggiungibile via Bluetooth (spento o fuori portata)")
@@ -77,18 +87,11 @@ class NervaCoordinator(DataUpdateCoordinator[dict]):
                     got.set_result(frame)
 
         try:
-            client = await asyncio.wait_for(
-                establish_connection(BleakClientWithServiceCache, device, self.address, max_attempts=2),
-                CONNECT_TIMEOUT,
+            # niente wait_for esterno: annullare una connect a metà lascia BlueZ in "InProgress"
+            client = await establish_connection(
+                BleakClientWithServiceCache, device, self.address, max_attempts=3
             )
-        except BaseException as err:  # noqa: BLE001
-            # connessione rimasta a metà in BlueZ: la chiudo esplicitamente
-            try:
-                await asyncio.shield(asyncio.wait_for(BleakClient(device).disconnect(), 5))
-            except BaseException:  # noqa: BLE001
-                pass
-            if isinstance(err, asyncio.CancelledError):
-                raise
+        except Exception as err:  # noqa: BLE001
             return self._fallback_or_raise(f"Connessione BLE fallita: {err!r}", err)
         try:
             notify, write = _find_chars(client)

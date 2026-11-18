@@ -56,5 +56,11 @@ class NervaSensor(CoordinatorEntity, SensorEntity):
         )
 
     @property
+    def available(self) -> bool:
+        return super().available and self.coordinator.data is not None
+
+    @property
     def native_value(self):
+        if self.coordinator.data is None:
+            return None
         return self.coordinator.data.get(self.entity_description.key)
