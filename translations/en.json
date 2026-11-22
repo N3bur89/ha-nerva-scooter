@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Nerva Scooter",
+        "data": {
+          "address": "Bluetooth Device",
+          "vin": "Frame Number (VIN)",
+          "model": "Model Code",
+          "password": "Nerva App Password (8 characters, optional)"
+        }
+      }
+    },
+    "error": {
+      "invalid_vin": "VIN must be 17 characters (uppercase letters and numbers)",
+      "invalid_password": "Password must be 8 characters long"
+    },
+    "abort": {
+      "already_configured": "Already configured"
+    }
+  }
+}
