@@ -16,7 +16,7 @@ CMD_VEHICLE_INFO = (0x1E, 0x46)  # comando "13"
 CMD_VIN = (0x1E, 0x47)  # comando "28"
 CMD_VERSION = (0x1E, 0x38)  # comando "16"
 CMD_BIND = (0x26, 0x4E)  # comando "05": associazione con password app (8 caratteri)
-BIND_REPLY_CODE = 0x4F  # risposta comando "06": ... VIN, 0xAA=ok / 0x55=rifiutato, modello
+BIND_REPLY_CODES = (0x4F, 0x51)  # risposta comando "06": ... VIN, 0xAA=ok / 0x55=rifiutato, modello
 
 
 def checksum(data: bytes) -> int:
@@ -40,7 +40,7 @@ def build_bind(vin: str, password: str, model: str) -> bytes:
 
 def parse_bind_reply(data: bytes) -> bool | None:
     """True=ok, False=rifiutato, None=non e' una risposta di binding."""
-    if len(data) < 31 or data[:4] != HEADER or data[9] != BIND_REPLY_CODE:
+    if len(data) < 31 or data[:4] != HEADER or data[9] not in BIND_REPLY_CODES:
         return None
     return {0xAA: True, 0x55: False}.get(data[10 + 17])
 

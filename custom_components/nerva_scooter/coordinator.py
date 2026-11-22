@@ -16,26 +16,66 @@ from .const import DOMAIN, RESPONSE_TIMEOUT, SCAN_INTERVAL_SECONDS
 from .protocol import CMD_VEHICLE_INFO, FrameBuffer, build_bind, build_command, parse_bind_reply
 
 _LOGGER = logging.getLogger(__name__)
+FAIL_INTERVAL = 300  # secondi tra le letture quando lo scooter non risponde (evita di tenere occupato l'adattatore)
 STALE_MAX = 600  # secondi: oltre, i sensori diventano "non disponibili"
-_STANDARD = ("00001800", "00001801", "0000180a")
+_NERVA_SERVICE_UUID = "fff0"
+_NERVA_NOTIFY_UUID = "fff1"
+_NERVA_WRITE_UUID = "fff2"
+
+
+def _matches_uuid16(uuid: str, short_uuid: str) -> bool:
+    """Confronta un UUID Bluetooth a 16 bit nelle forme Bleak più comuni."""
+    normalized = str(uuid).lower()
+    return normalized in {
+        short_uuid,
+        f"0000{short_uuid}",
+        f"0000{short_uuid}-0000-1000-8000-00805f9b34fb",
+    }
 
 
 def _find_chars(client: BleakClient):
-    """Cerca (caratteristica notify, caratteristica write) nel servizio dati."""
+    """Trova esclusivamente FFF1/FFF2 nel servizio Nerva FFF0."""
     services = list(client.services)
     for idx, svc in enumerate(services):
-        _LOGGER.debug("Servizio %s: %s", idx, svc.uuid)
+        service_uuid = str(svc.uuid).lower()
+        _LOGGER.debug("Servizio %s: %s", idx, service_uuid)
         for ch in svc.characteristics:
             _LOGGER.debug("  %s %s", ch.uuid, ch.properties)
 
-    fff0 = [s for s in services if s.uuid.startswith("0000fff0")]
-    others = [s for s in services if not s.uuid.startswith(_STANDARD) and not s.uuid.startswith("0000fff0")]
-    for svc in fff0 + others:
-        notify = [c for c in svc.characteristics if "notify" in c.properties or "indicate" in c.properties]
-        write = [c for c in svc.characteristics if "write-without-response" in c.properties or "write" in c.properties]
-        if notify and write:
-            return notify[0], write[0]
-    raise UpdateFailed("Caratteristiche BLE notify/write non trovate")
+        if not _matches_uuid16(service_uuid, _NERVA_SERVICE_UUID):
+            continue
+
+        notify = next(
+            (
+                char
+                for char in svc.characteristics
+                if _matches_uuid16(char.uuid, _NERVA_NOTIFY_UUID)
+                and ("notify" in char.properties or "indicate" in char.properties)
+            ),
+            None,
+        )
+        write = next(
+            (
+                char
+                for char in svc.characteristics
+                if _matches_uuid16(char.uuid, _NERVA_WRITE_UUID)
+                and (
+                    "write-without-response" in char.properties
+                    or "write" in char.properties
+                )
+            ),
+            None,
+        )
+        if notify is not None and write is not None:
+            _LOGGER.debug(
+                "Uso caratteristiche BLE notify=%s, write=%s",
+                notify.uuid,
+                write.uuid,
+            )
+            return notify, write
+    raise UpdateFailed(
+        "Servizio BLE Nerva 0000fff0 con notify FFF1 e write FFF2 non trovato"
+    )
 
 
 class NervaCoordinator(DataUpdateCoordinator[dict]):
@@ -51,6 +91,7 @@ class NervaCoordinator(DataUpdateCoordinator[dict]):
 
     def _fallback_or_raise(self, msg: str, err: Exception | None = None) -> dict:
         self.connected = False
+        self.update_interval = timedelta(seconds=FAIL_INTERVAL)
         if self.data and time.monotonic() - self._last_ok < STALE_MAX:
             _LOGGER.debug("%s - mantengo ultimi dati validi", msg)
             return self.data
@@ -69,6 +110,9 @@ class NervaCoordinator(DataUpdateCoordinator[dict]):
             return await self._read_scooter()
 
     async def _read_scooter(self) -> dict:
+        # se lo scooter non sta trasmettendo (spento/fuori portata) non occupo l'adattatore con tentativi inutili
+        if not bluetooth.async_address_present(self.hass, self.address, connectable=True):
+            return self._fallback_or_raise("Scooter non visibile via Bluetooth (spento o fuori portata)")
         device = bluetooth.async_ble_device_from_address(self.hass, self.address, connectable=True)
         if device is None:
             return self._fallback_or_raise("Scooter non raggiungibile via Bluetooth (spento o fuori portata)")
@@ -87,16 +131,21 @@ class NervaCoordinator(DataUpdateCoordinator[dict]):
                     got.set_result(frame)
 
         try:
-            # niente wait_for esterno: annullare una connect a metà lascia BlueZ in "InProgress"
+            # niente wait_for esterno: annullare una connect a metà lascia BlueZ in "InProgress".
+            # un solo tentativo per giro: con segnale debole ogni tentativo può durare ~20 s e tiene occupato hci0;
+            # si riprova al giro successivo
             client = await establish_connection(
-                BleakClientWithServiceCache, device, self.address, max_attempts=3
+                BleakClientWithServiceCache, device, self.address, max_attempts=1
             )
         except Exception as err:  # noqa: BLE001
             return self._fallback_or_raise(f"Connessione BLE fallita: {err!r}", err)
         try:
+            if not client.is_connected:
+                raise UpdateFailed("La connessione BLE si è interrotta prima dell'attivazione delle notifiche")
             notify, write = _find_chars(client)
             use_response = "write-without-response" not in write.properties
             await client.start_notify(notify, _on_data)
+            await asyncio.sleep(0.3)  # lascia al dispositivo il tempo di attivare le notifiche
             if self.password:
                 await client.write_gatt_char(write, build_bind(self.vin, self.password, self.model), response=use_response)
                 try:
@@ -108,13 +157,17 @@ class NervaCoordinator(DataUpdateCoordinator[dict]):
             data = await asyncio.wait_for(got, RESPONSE_TIMEOUT)
             self.connected = True
             self._last_ok = time.monotonic()
+            self.update_interval = timedelta(seconds=SCAN_INTERVAL_SECONDS)
             return data
         except asyncio.TimeoutError as err:
-            return self._fallback_or_raise("Nessuna risposta dallo scooter (codice modello errato?)", err)
+            return self._fallback_or_raise("Nessuna notifica telemetrica ricevuta dallo scooter entro il timeout", err)
+        except UpdateFailed as err:
+            return self._fallback_or_raise(str(err), err)
         except Exception as err:
             return self._fallback_or_raise(f"Errore lettura BLE: {err}", err)
         finally:
             try:
-                await client.disconnect()
+                if client.is_connected:
+                    await client.disconnect()
             except Exception:  # noqa: BLE001
                 pass
